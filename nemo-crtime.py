@@ -12,6 +12,7 @@ gi.require_version('Nemo', '3.0')
 from gi.repository import Nemo, GObject, Gio
 
 # Constants that should be kept in sync with Nemo...
+# See https://github.com/linuxmint/nemo/blob/master/libnemo-private/nemo-global-preferences.h#L52-L57
 NEMO_DATE_FORMAT_LOCALE = 0
 NEMO_DATE_FORMAT_ISO = 1
 NEMO_DATE_FORMAT_INFORMAL = 2
@@ -81,31 +82,53 @@ class NemoCreationTime(GObject.GObject, Nemo.ColumnProvider, Nemo.InfoProvider,
                             description=_("File/folder creation time (NTFS/FAT32)")),)
 
 
-    def update_file_info(self, fileinfo):
-        """Updates the Nemo file attributes for the given file.."""
+    def update_file_info_full(self, provider, handle, closure, fileinfo):
+        """
+        Updates the Nemo file attributes for the given file: this is the master function called to start file list processing.
+        """
 
         if fileinfo.get_uri_scheme() == 'file':
-            filename = fileinfo.get_location().get_path()
-            try:
-                crtime = get_crtime(filename)
-            except:
-                traceback.print_exc()  # Log exceptions
-            else:
-                # get_crtime() returns None if on an unsupported file system
-                if crtime is not None:
-                    struct_time = time.gmtime(crtime)
-                    # Respect Nemo's time formatting. XXX: can we get this data from Nemo directly?
-                    settings = Gio.Settings.new('org.nemo.preferences')
-                    timeformat = settings.get_enum('date-format')
+            # Set the creation time column blank while we process it.
+            fileinfo.add_string_attribute('creation_time', _('Processing...'))
 
-                    if timeformat == NEMO_DATE_FORMAT_LOCALE:
-                        formatted_time = time.strftime('%c', struct_time)
-                    else:  # XXX: no support for "informal" time format yet
-                        formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', struct_time)
-                    fileinfo.add_string_attribute('creation_time', formatted_time)
+            # From https://stackoverflow.com/questions/9660065/
+            # Add a timer to call the real "fetch creation time" routine later, and
+            # return that the operation is in progress. This makes loading directories
+            # much faster as it doesn't block all of Nemo.
+            GObject.timeout_add(1, self.write_creation_time_callback, provider, handle,
+                                        closure, fileinfo)
+            return Nemo.OperationResult.IN_PROGRESS
 
         return Nemo.OperationResult.COMPLETE
 
+    def write_creation_time_callback(self, provider, handle, closure, fileinfo):
+        """
+        Callback to update the creation time for a file.
+        """
+        filename = fileinfo.get_location().get_path()
+        try:
+            crtime = get_crtime(filename)
+        except:
+            traceback.print_exc()  # Log exceptions
+        else:
+            # get_crtime() returns None if on an unsupported file system
+            if crtime is not None:
+                struct_time = time.gmtime(crtime)
+                # Respect Nemo's time formatting. XXX: can we get this data from Nemo directly?
+                settings = Gio.Settings.new('org.nemo.preferences')
+                timeformat = settings.get_enum('date-format')
+
+                if timeformat == NEMO_DATE_FORMAT_LOCALE:
+                    formatted_time = time.strftime('%c', struct_time)
+                else:  # XXX: no support for "informal" time format yet
+                    formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', struct_time)
+                fileinfo.invalidate_extension_info()
+                fileinfo.add_string_attribute('creation_time', formatted_time)
+
+        # Tell nemo that we're done processing.
+        Nemo.info_provider_update_complete_invoke(closure, provider,
+                                                  handle, Nemo.OperationResult.COMPLETE)
+        return False
 
 if __name__ == '__main__':
     import time
